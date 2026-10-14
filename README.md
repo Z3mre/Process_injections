@@ -136,6 +136,19 @@ All practical tests were conducted in controlled environments for educational an
 
 It is **not intended for unauthorized access, deployment against third-party systems, or malicious use**.
 
+## Future Work
+
+The repository also serves as a foundation for further personal research into Windows internals, reverse engineering, and defensive detection techniques.
+
+- **Finalize ShellWasp:** Complete the technical study and conduct a controlled experimental evaluation.
+- **Expand detection analysis:** Investigate Windows telemetry, Sysmon events, and detection rules using Wazuh.
+- **Test across Windows versions:** Compare observations across different Windows versions and builds.
+- **Automate experiments:** Develop a Python script to collect logs, organize results, and generate reports.
+- **Investigate additional detection mechanisms:** Explore ETW and kernel-level telemetry from a defensive perspective.
+- **Extend the evaluation:** Study additional security products and compare the observable behaviors of selected system call techniques.
+
+These are the main areas I plan to explore as I continue developing this project.
+
 ## Author
 
 **Emre Duran**
